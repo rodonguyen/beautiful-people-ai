@@ -24,126 +24,187 @@ We prioritize the **bare code + TUI** version for quick validation and testing, 
 
 ## 2. Tech Stack (Bare/TUI Version)
 - **Language** — Python 3.10+.
-- **AI/ML** — Hugging Face Transformers, LangChain (RAG), Sentence Transformers (embeddings), FAISS (vector store).
-- **LLM** — Start with local/open (e.g., google/flan-t5-large or better like Mistral via HuggingFaceHub if API key). For better Naval-like reasoning, consider OpenAI/Grok API later.
-- **Interface** — Pure Python with `input()` + optional `rich` for nice terminal formatting.
-- **Storage** — In-memory dict for speed (validate idea first).
-- **Install** — `pip install langchain transformers faiss-cpu sentence-transformers rich` (rich optional).
+- **AI/ML** — Sentence Transformers (embeddings), FAISS (vector store), LangChain (RAG pipeline).
+- **LLM** — Anthropic API (Claude). Set `ANTHROPIC_API_KEY` environment variable. Use `claude-haiku-4-5-20251001` for speed/cost during development; swap to `claude-sonnet-4-5-20250929` for better reasoning quality.
+- **Interface** — Pure Python TUI with `rich` for terminal formatting.
+- **Storage** — JSON file (`data/insights.json`) for persistence across sessions.
+- **Install** — `pip install anthropic langchain langchain-anthropic langchain-community faiss-cpu sentence-transformers rich`
 
-## 3. Insight Extraction & Augmentation (Naval-Tailored)
-- **Basic Extraction** — Summarize, extract entities (concepts like "leverage", "specific knowledge", people/books).
+## 3. Project Structure
+```
+src/
+  naval_clone_tui.py     # Main TUI entrypoint
+  extractor.py           # Extraction + augmentation via Anthropic API
+  clone.py               # Vectorstore build + RAG query
+  storage.py             # JSON load/save helpers
+data/
+  insights.json          # Persisted insights (auto-created)
+.env                     # ANTHROPIC_API_KEY=sk-ant-...
+requirements.txt
+```
+
+## 4. Insight Extraction & Augmentation (Naval-Tailored)
 - **Augmentation Step** (critical for Naval mimicry):
-  - Infer core principle/mental model.
-  - Generalize to timeless rule.
+  - Infer core principle/mental model from the original text.
+  - Generalize to a timeless rule.
   - Rephrase in aphoristic, calm style.
-  - Add related Naval themes (e.g., link to happiness = peace, desire = suffering, compound interest).
+  - Tag related Naval themes (happiness, peace, desire, leverage, specific knowledge, compounding).
 - **Example Input** — "Desire is a contract you make with yourself to be unhappy until you get what you want."
   - Augmented Output:
     - specific: Desire creates unhappiness until fulfilled.
     - causation: Attachment to outcomes → mental suffering.
-    - generalized: "Peace comes from dropping unnecessary desires. Happiness is the absence of desire for what is not already present."
+    - generalized: "Peace comes from dropping unnecessary desires."
     - naval-style aphorism: "Desire is suffering in anticipation."
 
-**Prompt for Augmentation** (tune this heavily):
+**Augmentation Prompt** (sent to Claude via Anthropic API):
 ```
-From this Naval Ravikant statement or excerpt: {text}
+From this Naval Ravikant statement or excerpt:
+"{text}"
 
-1. Summarize the key insight concisely.
-2. Infer the underlying causation or mental model.
-3. Generalize to a broader life principle.
-4. Rephrase as a calm, aphoristic Naval-style quote or rule.
-5. Link to related Naval themes (health, happiness, wealth, leverage, judgment, peace, desire).
+Reply in this exact format:
+1. KEY INSIGHT: <concise summary of the core idea>
+2. MENTAL MODEL: <underlying causation or reasoning pattern>
+3. PRINCIPLE: <broader, timeless life principle>
+4. APHORISM: <calm, Naval-style aphoristic restatement>
+5. THEMES: <comma-separated Naval themes: e.g., desire, peace, leverage, specific knowledge, happiness, wealth, compounding, judgment>
 ```
 
-## 4. Code Structure
-Single script for simplicity: `naval_clone_tui.py`
+## 5. Code Structure
 
-### 4.1 Imports & Globals
+### 5.1 `requirements.txt`
+```
+anthropic
+langchain
+langchain-anthropic
+langchain-community
+faiss-cpu
+sentence-transformers
+rich
+```
+
+### 5.2 `.env`
+```
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### 5.3 `src/storage.py`
 ```python
+import json
+import os
+
+INSIGHTS_PATH = "data/insights.json"
+
+def load_insights() -> list[dict]:
+    if not os.path.exists(INSIGHTS_PATH):
+        return []
+    with open(INSIGHTS_PATH) as f:
+        return json.load(f)
+
+def save_insights(insights: list[dict]) -> None:
+    os.makedirs("data", exist_ok=True)
+    with open(INSIGHTS_PATH, "w") as f:
+        json.dump(insights, f, indent=2)
+```
+
+### 5.4 `src/extractor.py`
+```python
+import anthropic
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+
+AUGMENT_PROMPT = """From this Naval Ravikant statement or excerpt:
+"{text}"
+
+Reply in this exact format:
+1. KEY INSIGHT: <concise summary of the core idea>
+2. MENTAL MODEL: <underlying causation or reasoning pattern>
+3. PRINCIPLE: <broader, timeless life principle>
+4. APHORISM: <calm, Naval-style aphoristic restatement>
+5. THEMES: <comma-separated Naval themes>"""
+
+
+def extract_and_augment(text: str) -> dict:
+    prompt = AUGMENT_PROMPT.format(text=text)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=512,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    response = message.content[0].text
+    lines = [l.strip() for l in response.splitlines() if l.strip()]
+
+    def extract_field(prefix):
+        for line in lines:
+            if line.upper().startswith(prefix):
+                return line.split(":", 1)[-1].strip()
+        return ""
+
+    return {
+        "original": text,
+        "key_insight": extract_field("1. KEY INSIGHT"),
+        "mental_model": extract_field("2. MENTAL MODEL"),
+        "principle": extract_field("3. PRINCIPLE"),
+        "aphorism": extract_field("4. APHORISM"),
+        "themes": extract_field("5. THEMES"),
+    }
+```
+
+### 5.5 `src/clone.py`
+```python
+import anthropic
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+client = anthropic.Anthropic()
+
+NAVAL_SYSTEM_PROMPT = """You are Naval Ravikant. Respond as Naval: calm, philosophical, concise.
+Use aphorisms and first-principles thinking. Focus on peace, leverage, specific knowledge,
+happiness over status games, and reducing unnecessary desire. Never be preachy.
+Keep responses under 5 sentences unless depth is needed."""
+
+
+def build_vectorstore(insights: list[dict]) -> FAISS:
+    texts = [
+        f"{i['aphorism']} | {i['principle']} | {i['themes']}"
+        for i in insights
+    ]
+    return FAISS.from_texts(texts, embeddings)
+
+
+def query_naval(vectorstore: FAISS, question: str) -> str:
+    docs = vectorstore.similarity_search(question, k=3)
+    context = "\n".join(d.page_content for d in docs)
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=512,
+        system=NAVAL_SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": f"Relevant wisdom from your writings:\n{context}\n\nQuestion: {question}"
+        }]
+    )
+    return message.content[0].text
+```
+
+### 5.6 `src/naval_clone_tui.py`
+```python
+import os
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.prompt import Prompt
-import spacy
-from transformers import pipeline
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.llms import HuggingFaceHub  # or OpenAI
-from langchain.chains import LLMChain, RetrievalQA
-from langchain.prompts import PromptTemplate
+from storage import load_insights, save_insights
+from extractor import extract_and_augment
+from clone import build_vectorstore, query_naval
 
+load_dotenv()
 console = Console()
-nlp = spacy.load("en_core_web_sm")
-summarizer = pipeline("summarization")
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-llm = HuggingFaceHub(repo_id="google/flan-t5-large")  # Upgrade for better results
 
-clones = {}  # {name: [insights_dicts]}
-```
 
-### 4.2 Extraction + Augmentation
-```python
-augment_prompt = PromptTemplate(
-    input_variables=["text"],
-    template="""
-From this Naval Ravikant statement or excerpt: {text}
-
-1. Summarize the key insight concisely.
-2. Infer the underlying causation or mental model.
-3. Generalize to a broader life principle.
-4. Rephrase as a calm, aphoristic Naval-style quote or rule.
-5. Link to related Naval themes (health, happiness, wealth, leverage, judgment, peace, desire).
-"""
-)
-
-augment_chain = LLMChain(llm=llm, prompt=augment_prompt)
-
-def extract_and_augment(text):
-    # Basic
-    summary = summarizer(text, max_length=80, min_length=30, do_sample=False)[0]['summary_text']
-    
-    # Augment
-    response = augment_chain.run(summary)
-    parts = [p.strip() for p in response.split('\n') if p.strip()]
-    
-    insight = {
-        "original": text,
-        "summary": summary,
-        "specific": parts[0] if len(parts) > 0 else "",
-        "causation": parts[1] if len(parts) > 1 else "",
-        "generalized": parts[2] if len(parts) > 2 else "",
-        "aphorism": parts[3] if len(parts) > 3 else "",
-        "themes": parts[4] if len(parts) > 4 else ""
-    }
-    return insight
-```
-
-### 4.3 Clone Building & Querying
-```python
-def build_naval_clone(insights):
-    texts = [f"{i['aphorism']} | {i['generalized']} | {i['themes']}" for i in insights]
-    vectorstore = FAISS.from_texts(texts, embeddings)
-    return vectorstore
-
-naval_response_prompt = """
-Respond as Naval Ravikant: calm, philosophical, concise, using aphorisms and first-principles thinking. 
-Focus on peace, leverage, specific knowledge, health, happiness over status or endless desire.
-Question: {question}
-Relevant wisdom: {context}
-"""
-
-def query_naval(vectorstore, question):
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
-        chain_type_kwargs={"prompt": PromptTemplate.from_template(naval_response_prompt)}
-    )
-    return qa_chain.run({"question": question, "context": ""})  # context auto-filled
-```
-
-### 4.4 TUI Main Loop
-```python
-def get_multiline(prompt_text):
+def get_multiline(prompt_text: str) -> str:
     console.print(prompt_text, style="bold cyan")
+    console.print("[dim]Type your text. Enter END on a new line when done.[/dim]")
     lines = []
     while True:
         line = input()
@@ -152,59 +213,69 @@ def get_multiline(prompt_text):
         lines.append(line)
     return "\n".join(lines)
 
+
 def main():
+    insights = load_insights()
+    vectorstore = build_vectorstore(insights) if insights else None
+
     while True:
-        console.print("\n[bold green]Naval Ravikant Life Advisor Clone (TUI)[/bold green]")
-        console.print("1 → Create/Load Naval Clone from content")
+        console.print("\n[bold green]Naval Ravikant Life Advisor Clone[/bold green]")
+        console.print(f"[dim]{len(insights)} insight(s) stored[/dim]")
+        console.print("1 → Add Naval content (quote / excerpt)")
         console.print("2 → Ask Naval a life question")
         console.print("3 → Show stored insights")
         console.print("4 → Exit")
-        choice = Prompt.ask("Choice", choices=["1","2","3","4"], default="4")
+        choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="4")
 
         if choice == "1":
-            content = get_multiline("Paste Naval quote/thread/excerpt (end with END):")
+            content = get_multiline("Paste Naval quote/thread/excerpt:")
             if not content.strip():
                 continue
+            console.print("[dim]Extracting and augmenting...[/dim]")
             insight = extract_and_augment(content)
-            clones.setdefault("Naval", []).append(insight)
-            console.print("[green]Insight added to Naval clone.[/green]")
+            insights.append(insight)
+            save_insights(insights)
+            vectorstore = build_vectorstore(insights)  # rebuild with new insight
+            console.print(f"[green]Added:[/green] {insight['aphorism']}")
 
         elif choice == "2":
-            if "Naval" not in clones or not clones["Naval"]:
-                console.print("[red]No insights yet. Add content first.[/red]")
+            if not vectorstore:
+                console.print("[red]No insights yet. Add content first (option 1).[/red]")
                 continue
-            vectorstore = build_naval_clone(clones["Naval"])
             while True:
-                question = Prompt.ask("Ask Naval (or 'back')")
+                question = Prompt.ask("\nAsk Naval (or 'back')")
                 if question.lower() == "back":
                     break
+                console.print("[dim]Thinking...[/dim]")
                 response = query_naval(vectorstore, question)
                 console.print(f"\n[bold yellow]Naval:[/bold yellow] {response}\n")
 
         elif choice == "3":
-            if "Naval" in clones:
-                for i, ins in enumerate(clones["Naval"], 1):
-                    console.print(f"{i}. {ins.get('aphorism', ins['summary'])}")
-            else:
+            if not insights:
                 console.print("[yellow]No insights stored.[/yellow]")
+            for i, ins in enumerate(insights, 1):
+                console.print(f"[bold]{i}.[/bold] {ins.get('aphorism') or ins.get('key_insight', '—')}")
+                console.print(f"   [dim]{ins.get('themes', '')}[/dim]")
 
         elif choice == "4":
             console.print("[bold]Peace be with you... Exiting.[/bold]")
             break
 
+
 if __name__ == "__main__":
     main()
 ```
 
-## 5. Validation & Testing Plan
-- Run: `python naval_clone_tui.py`
-- Step 1: Paste famous Naval quotes/threads (e.g., from *Almanack* PDF excerpts, @naval tweets, "How to Get Rich" thread).
+## 6. Validation & Testing Plan
+- Setup: `cp .env.example .env` → fill in `ANTHROPIC_API_KEY`
+- Run: `cd src && python naval_clone_tui.py`
+- Step 1: Paste 3–5 famous Naval quotes/threads (from *Almanack*, "How to Get Rich" thread, @naval).
 - Step 2: Query examples:
   - "How do I become happy?"
   - "Should I optimize for money or peace?"
   - "What is leverage in life?"
-- Check: Does it respond calmly, aphoristically, with Naval-like reframing? Are generalizations principled?
-- Iterate: Improve augmentation prompt for more Naval tone; upgrade LLM if responses are too generic.
-- Next: Add DB persistence, web UI, auto-ingest from navalmanack.com or X.
+- Check: Does it respond calmly, aphoristically, with Naval-like reframing?
+- Iterate: Tune `NAVAL_SYSTEM_PROMPT` and the augmentation prompt for tone. Swap to `claude-sonnet-4-5-20250929` if responses need more depth.
+- Next: Add web UI, auto-ingest from navalmanack.com or X.
 
 This bare TUI lets you rapidly test if the clone captures Naval's essence. Once validated, expand to full app. Peace.
